@@ -71,11 +71,11 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 
 // Position the triangle in front of the camera.
 	uvMat4SetIdentity(&model);
-	uvMat4LocalTranslate(&model, 0.0f, 0.0f, -3.0f);
+	uvMat4LocalTranslate(&model, 0.0f, 0.0f, -4.0f);
 
 // Rotate around two axes so its 3D orientation is visible.
+	uvMat4RotateAxis(&model, angle, 'x');
 	uvMat4RotateAxis(&model, angle, 'y');
-	uvMat4RotateAxis(&model, angle * 0.6f, 'x');
 
 	uvMat4Scale(&model, 0.75f, 0.75f, 0.75f);
 
@@ -83,8 +83,6 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	PackHostMatrix(modelMatrix, model);
 
 	static Vp viewport{};
-	static Vtx vertices[3] {};
-
 	// A 120x80 viewport centered in the 320x240 logical screen.
 	// Viewport X/Y values have two fractional bits.
 	viewport.vp.vscale[0] = 160 * 4;
@@ -97,35 +95,86 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	viewport.vp.vtrans[2] = G_MAXZ / 2;
 	viewport.vp.vtrans[3] = 0;
 
-	// Identity matrices mean these are already clip-space positions.
-	vertices[0].v.ob[0] = -1;
-	vertices[0].v.ob[1] = -1;
-	vertices[0].v.ob[2] = 0;
+	static Vtx vertices[24] {};
+	// Cube vertices in local model coordinates.
+	static constexpr short facePositions[6][4][3] = {
+		// Front: +Z
+			{
+				{-1, -1,  1},
+				{ 1, -1,  1},
+				{ 1,  1,  1},
+				{-1,  1,  1}
+			},
 
-	vertices[1].v.ob[0] = 1;
-	vertices[1].v.ob[1] = -1;
-	vertices[1].v.ob[2] = 0;
+		// Back: -Z
+			{
+				{ 1, -1, -1},
+				{-1, -1, -1},
+				{-1,  1, -1},
+				{ 1,  1, -1}
+			},
 
-	vertices[2].v.ob[0] = 0;
-	vertices[2].v.ob[1] = 1;
-	vertices[2].v.ob[2] = 0;
+		// Right: +X
+			{
+				{ 1, -1,  1},
+				{ 1, -1, -1},
+				{ 1,  1, -1},
+				{ 1,  1,  1}
+			},
 
-	// Red, green, and blue vertices, all fully opaque.
-	vertices[0].v.cn[0] = 255;
-	vertices[0].v.cn[1] = 0;
-	vertices[0].v.cn[2] = 0;
-	vertices[0].v.cn[3] = 255;
+		// Left: -X
+			{
+				{-1, -1, -1},
+				{-1, -1,  1},
+				{-1,  1,  1},
+				{-1,  1, -1}
+			},
 
-	vertices[1].v.cn[0] = 0;
-	vertices[1].v.cn[1] = 255;
-	vertices[1].v.cn[2] = 0;
-	vertices[1].v.cn[3] = 255;
+		// Top: +Y
+			{
+				{-1,  1,  1},
+				{ 1,  1,  1},
+				{ 1,  1, -1},
+				{-1,  1, -1}
+			},
 
-	vertices[2].v.cn[0] = 0;
-	vertices[2].v.cn[1] = 0;
-	vertices[2].v.cn[2] = 255;
-	vertices[2].v.cn[3] = 255;
+		// Bottom: -Y
+			{
+				{-1, -1, -1},
+				{ 1, -1, -1},
+				{ 1, -1,  1},
+				{-1, -1,  1}
+			}
+		};
 
+	static constexpr unsigned char faceColors[6][3] = {
+			{255,  64,  64},
+			{ 64, 255, 255},
+			{ 64, 255,  64},
+			{255,  64, 255},
+			{ 64,  96, 255},
+			{255, 224,  64}
+		};
+
+	for (int face = 0; face < 6; ++face) {
+		for (int corner = 0; corner < 4; ++corner) {
+			Vtx& vertex = vertices[face * 4 + corner];
+
+			for (int axis = 0; axis < 3; ++axis) {
+				vertex.v.ob[axis] =
+				    facePositions[face][corner][axis];
+				}
+
+			vertex.v.flag = 0;
+			vertex.v.tc[0] = 0;
+			vertex.v.tc[1] = 0;
+
+			vertex.v.cn[0] = faceColors[face][0];
+			vertex.v.cn[1] = faceColors[face][1];
+			vertex.v.cn[2] = faceColors[face][2];
+			vertex.v.cn[3] = 255;
+			}
+		}
 	Gfx* p = commands;
 
 	gDPPipeSync(p++);
@@ -164,7 +213,7 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 
 	// No lighting, fog, depth testing, texture generation, or culling.
 	gSPClearGeometryMode(p++, 0xFFFFFFFFu);
-	gSPSetGeometryMode(p++, G_SHADE | G_SHADING_SMOOTH);
+	gSPSetGeometryMode(p++, G_SHADE | G_SHADING_SMOOTH | G_CULL_BACK);
 	gSPTexture(p++, 0, 0, 0, G_TX_RENDERTILE, G_OFF);
 
 	gSPViewport(p++, &viewport);
@@ -178,10 +227,19 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	    G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
 
 	const Gfx vertexLoad = {
-		gsSPVertex(vertices, 3, 0)
+		gsSPVertex(vertices, 24, 0)
 		};
 	*p++ = vertexLoad;
-	gSP1Triangle(p++, 0, 1, 2, 0);
+
+	for (int face = 0; face < 6; ++face) {
+		const int base = face * 4;
+
+		gSP1Triangle(
+		    p++, base, base + 1, base + 2, 0);
+
+		gSP1Triangle(
+		    p++, base, base + 2, base + 3, 0);
+		}
 
 	gDPPipeSync(p++);
 	gDPFullSync(p++);
