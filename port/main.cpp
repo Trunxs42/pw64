@@ -6,19 +6,184 @@
 #include <thread>
 #include <imgui.h>
 #include "controller_host.h"
-#include "libultraship/libultra/gbi.h"
 #include <algorithm>
+#include "rom_model.h"
+#include "rom_texture.h"
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <stdexcept>
+#include <string_view>
+#include <system_error>
+#include <array>
+#include <vector>
 
+#include "fast/Fast3dWindow.h"
+#include "libultraship/libultra/gbi.h"
+#include "libultraship/controller/controldeck/ControlDeck.h"
 #include "ship/Context.h"
 #include "ship/resource/ResourceManager.h"
 #include "ship/config/Config.h"
 #include "ship/config/ConsoleVariable.h"
-#include "fast/Fast3dWindow.h"
-#include "libultraship/controller/controldeck/ControlDeck.h"
 
 extern "C" {
 #include <uv_vector.h>
 #include <uv_matrix.h>
+	}
+
+static std::vector<Mtx4F> BuildPreviewPartTransforms(
+    const RomPreviewModel& asset) {
+
+	if (asset.parts.empty() ||
+	        asset.parts.size() != asset.matrices.size() ||
+	        asset.parts.size() > 8) {
+		throw std::runtime_error(
+		    "Invalid preview part/matrix counts.");
+		}
+
+	std::vector<Mtx4F> transforms(asset.parts.size());
+	std::vector<std::size_t> ancestors;
+
+	const unsigned int rootDepth = asset.parts.front().depth;
+
+	for (std::size_t i = 0; i < asset.parts.size(); ++i) {
+		const unsigned int storedDepth = asset.parts[i].depth;
+
+		if (storedDepth < rootDepth) {
+			throw std::runtime_error(
+			    "Part hierarchy rises above its root.");
+			}
+
+		const std::size_t depth = storedDepth - rootDepth;
+
+		if ((i != 0 && depth == 0) ||
+		        depth > ancestors.size()) {
+			throw std::runtime_error(
+			    "Unsupported or discontinuous part hierarchy.");
+			}
+
+		ancestors.resize(depth);
+
+		Mtx4F local{};
+
+		for (int row = 0; row < 4; ++row) {
+			for (int col = 0; col < 4; ++col) {
+				local.m[row][col] = asset.matrices[i][row][col];
+				}
+			}
+
+		if (depth == 0) {
+			uvMat4Copy(&transforms[i], &local);
+			}
+		else {
+			uvMat4Mul(
+			    &transforms[i],
+			    &local,
+			    &transforms[ancestors.back()]);
+			}
+
+		ancestors.push_back(i);
+		}
+
+	return transforms;
+	}
+
+struct PreviewFraming {
+	float center[3] {};
+	float scale = 1.0f;
+	};
+
+static PreviewFraming CalculatePreviewFraming(
+    const RomPreviewModel& asset,
+    const std::vector<Mtx4F>& partTransforms) {
+
+	std::vector<std::array<float, 3>> positions;
+
+	for (const RomPreviewBatch& batch : asset.batches) {
+		RequireRange(
+		    batch.partIndex, 1, partTransforms.size());
+
+		RequireRange(
+		    batch.firstTriangle,
+		    batch.triangleCount,
+		    asset.triangles.size());
+
+		const Mtx4F& matrix = partTransforms[batch.partIndex];
+
+		const std::size_t end =
+		    batch.firstTriangle + batch.triangleCount;
+
+		for (std::size_t t = batch.firstTriangle; t < end; ++t) {
+			for (unsigned int index : asset.triangles[t]) {
+				RequireRange(index, 1, asset.vertices.size());
+
+				const auto& source = asset.vertices[index].position;
+				std::array<float, 3> position{};
+
+				for (int axis = 0; axis < 3; ++axis) {
+					position[axis] =
+					    source[0] * matrix.m[0][axis] +
+					    source[1] * matrix.m[1][axis] +
+					    source[2] * matrix.m[2][axis] +
+					    matrix.m[3][axis];
+
+					if (!std::isfinite(position[axis])) {
+						throw std::runtime_error(
+						    "Non-finite assembled model position.");
+						}
+					}
+
+				positions.push_back(position);
+				}
+			}
+		}
+
+	if (positions.empty()) {
+		throw std::runtime_error(
+		    "Cannot frame a model without triangles.");
+		}
+
+	auto minimum = positions.front();
+	auto maximum = positions.front();
+
+	for (const auto& position : positions) {
+		for (int axis = 0; axis < 3; ++axis) {
+			minimum[axis] =
+			    std::min(minimum[axis], position[axis]);
+			maximum[axis] =
+			    std::max(maximum[axis], position[axis]);
+			}
+		}
+
+	PreviewFraming framing;
+
+	for (int axis = 0; axis < 3; ++axis) {
+		framing.center[axis] =
+		    (minimum[axis] + maximum[axis]) * 0.5f;
+		}
+
+	float radiusSquared = 0.0f;
+
+	for (const auto& position : positions) {
+		float distanceSquared = 0.0f;
+
+		for (int axis = 0; axis < 3; ++axis) {
+			const float offset =
+			    position[axis] - framing.center[axis];
+
+			distanceSquared += offset * offset;
+			}
+
+		radiusSquared = std::max(radiusSquared, distanceSquared);
+		}
+
+	if (!std::isfinite(radiusSquared) || radiusSquared <= 0.0f) {
+		throw std::runtime_error(
+		    "Cannot frame a zero-size or invalid model.");
+		}
+
+	framing.scale = 1.5f / std::sqrt(radiusSquared);
+	return framing;
 	}
 
 static void PackHostMatrix(
@@ -47,13 +212,97 @@ static void PackHostMatrix(
 		}
 	}
 
-static Gfx* BuildGraphicsTest(int x, int y, float angle) {
-	static Gfx commands[64] {};
-	static uint16_t colorBuffer[320 * 240] {};
+struct PreviewDrawGroup {
+	std::size_t batchIndex{};
+	std::size_t vertexCount{};
+	std::array<Vtx, 30> vertices{};
+	};
 
-	// Packed N64 identity matrix:
+static std::vector<PreviewDrawGroup> BuildPreviewDrawGroups(
+    const RomPreviewModel& asset) {
+
+	std::vector<PreviewDrawGroup> groups;
+
+	for (std::size_t b = 0; b < asset.batches.size(); ++b) {
+		const RomPreviewBatch& batch = asset.batches[b];
+
+		RequireRange(
+		    batch.firstTriangle,
+		    batch.triangleCount,
+		    asset.triangles.size());
+
+		for (std::size_t first = 0;
+		        first < batch.triangleCount;
+		        first += 10) {
+
+			PreviewDrawGroup group;
+			group.batchIndex = b;
+
+			const std::size_t triangleCount =
+			    std::min<std::size_t>(
+			        10, batch.triangleCount - first);
+
+			for (std::size_t t = 0; t < triangleCount; ++t) {
+				const auto& triangle =
+				    asset.triangles[
+				        batch.firstTriangle + first + t];
+
+				for (int corner = 0; corner < 3; ++corner) {
+					const std::size_t sourceIndex =
+					    triangle[corner];
+
+					RequireRange(
+					    sourceIndex, 1, asset.vertices.size());
+
+					const RomModelVertex& source =
+					    asset.vertices[sourceIndex];
+
+					Vtx& destination =
+					    group.vertices[group.vertexCount++];
+
+					for (int axis = 0; axis < 3; ++axis) {
+						destination.v.ob[axis] =
+						    source.position[axis];
+						}
+
+					destination.v.flag = source.flag;
+
+					for (int axis = 0; axis < 2; ++axis) {
+						destination.v.tc[axis] =
+						    source.texture[axis];
+						}
+
+					for (int component = 0;
+					        component < 4;
+					        ++component) {
+						destination.v.cn[component] =
+						    source.color[component];
+						}
+					}
+				}
+
+			groups.push_back(group);
+			}
+		}
+
+	return groups;
+	}
+
+static Gfx* BuildGraphicsTest(
+    int x, int y, float angle,
+    const RomPreviewModel& asset,
+    const PreviewFraming& framing,
+    const RomPreviewTexture2& texture,
+    const RomPreviewTexture2* modelTexture,
+    const std::vector<PreviewDrawGroup>& drawGroups,
+    const std::vector<Mtx4F>& partTransforms) {
+	static Gfx commands[4096] {};
+	alignas(8) static uint16_t colorBuffer[320 * 240] {};
+	alignas(8) static uint16_t depthBuffer[320 * 240] {};
+
+	// Persistent packed matrices used by the display list.
 	alignas(8) static uint32_t projectionMatrix[16] {};
-	alignas(8) static uint32_t modelMatrix[16] {};
+	alignas(8) static uint32_t partMatrices[8][16] {};
 
 	Mtx4F projection{};
 	Mtx4F model{};
@@ -77,10 +326,33 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	uvMat4RotateAxis(&model, angle, 'x');
 	uvMat4RotateAxis(&model, angle, 'y');
 
-	uvMat4Scale(&model, 0.75f, 0.75f, 0.75f);
+	uvMat4Scale(
+	    &model,
+	    framing.scale,
+	    framing.scale,
+	    framing.scale);
+
+	uvMat4LocalTranslate(
+	    &model,
+	    -framing.center[0],
+	    -framing.center[1],
+	    -framing.center[2]);
 
 	PackHostMatrix(projectionMatrix, projection);
-	PackHostMatrix(modelMatrix, model);
+
+	if (partTransforms.size() != asset.parts.size() ||
+	        partTransforms.empty() || partTransforms.size() > 8) {
+		throw std::runtime_error(
+		    "Invalid renderer part transforms.");
+		}
+
+	for (std::size_t i = 0; i < partTransforms.size(); ++i) {
+		Mtx4F localToAssembled = partTransforms[i];
+		Mtx4F modelView{};
+
+		uvMat4Mul(&modelView, &localToAssembled, &model);
+		PackHostMatrix(partMatrices[i], modelView);
+		}
 
 	static Vp viewport{};
 	// A 120x80 viewport centered in the 320x240 logical screen.
@@ -95,99 +367,36 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	viewport.vp.vtrans[2] = G_MAXZ / 2;
 	viewport.vp.vtrans[3] = 0;
 
-	static Vtx vertices[24] {};
-	// Cube vertices in local model coordinates.
-	static constexpr short facePositions[6][4][3] = {
-		// Front: +Z
-			{
-				{-1, -1,  1},
-				{ 1, -1,  1},
-				{ 1,  1,  1},
-				{-1,  1,  1}
-			},
-
-		// Back: -Z
-			{
-				{ 1, -1, -1},
-				{-1, -1, -1},
-				{-1,  1, -1},
-				{ 1,  1, -1}
-			},
-
-		// Right: +X
-			{
-				{ 1, -1,  1},
-				{ 1, -1, -1},
-				{ 1,  1, -1},
-				{ 1,  1,  1}
-			},
-
-		// Left: -X
-			{
-				{-1, -1, -1},
-				{-1, -1,  1},
-				{-1,  1,  1},
-				{-1,  1, -1}
-			},
-
-		// Top: +Y
-			{
-				{-1,  1,  1},
-				{ 1,  1,  1},
-				{ 1,  1, -1},
-				{-1,  1, -1}
-			},
-
-		// Bottom: -Y
-			{
-				{-1, -1, -1},
-				{ 1, -1, -1},
-				{ 1, -1,  1},
-				{-1, -1,  1}
-			}
-		};
-
-	static constexpr unsigned char faceColors[6][3] = {
-			{255,  64,  64},
-			{ 64, 255, 255},
-			{ 64, 255,  64},
-			{255,  64, 255},
-			{ 64,  96, 255},
-			{255, 224,  64}
-		};
-
-	for (int face = 0; face < 6; ++face) {
-		for (int corner = 0; corner < 4; ++corner) {
-			Vtx& vertex = vertices[face * 4 + corner];
-
-			for (int axis = 0; axis < 3; ++axis) {
-				vertex.v.ob[axis] =
-				    facePositions[face][corner][axis];
-				}
-
-			vertex.v.flag = 0;
-			vertex.v.tc[0] = 0;
-			vertex.v.tc[1] = 0;
-
-			vertex.v.cn[0] = faceColors[face][0];
-			vertex.v.cn[1] = faceColors[face][1];
-			vertex.v.cn[2] = faceColors[face][2];
-			vertex.v.cn[3] = 255;
-			}
-		}
 	Gfx* p = commands;
 
 	gDPPipeSync(p++);
-	gDPSetColorImage(
-	    p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, colorBuffer);
-
 	gDPSetScissor(p++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+
 	gDPSetCycleType(p++, G_CYC_FILL);
 	gDPSetRenderMode(p++, G_RM_NOOP, G_RM_NOOP2);
 
+// Identify the depth buffer.
+	gDPSetDepthImage(p++, depthBuffer);
+
+// Temporarily target it with fill commands to clear depth.
+	gDPSetColorImage(
+	    p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, depthBuffer);
+
+	const uint32_t clearDepth = GPACK_ZDZ(G_MAXFBZ, 0);
+
+	gDPSetFillColor(
+	    p++, (clearDepth << 16) | clearDepth);
+	gDPFillRectangle(p++, 0, 0, 319, 239);
+
+	gDPPipeSync(p++);
+
+// Restore the color target before clearing the background.
+	gDPSetColorImage(
+	    p++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, colorBuffer);
+
 	// Clear the entire background.
 	const uint32_t background =
-	    GPACK_RGBA5551(16, 24, 48, 1);
+	    GPACK_RGBA5551(160, 176, 192, 1);
 
 	gDPSetFillColor(
 	    p++, (background << 16) | background);
@@ -205,16 +414,10 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 
 	gDPPipeSync(p++);
 
-	// Switch from rectangle fill mode to triangle rendering.
+// Shared triangle-rendering setup; materials are applied per batch.
 	gDPSetCycleType(p++, G_CYC_1CYCLE);
-	gDPSetRenderMode(p++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+	gDPSetDepthSource(p++, G_ZS_PIXEL);
 	gDPSetAlphaCompare(p++, G_AC_NONE);
-	gDPSetCombineMode(p++, G_CC_SHADE, G_CC_SHADE);
-
-	// No lighting, fog, depth testing, texture generation, or culling.
-	gSPClearGeometryMode(p++, 0xFFFFFFFFu);
-	gSPSetGeometryMode(p++, G_SHADE | G_SHADING_SMOOTH | G_CULL_BACK);
-	gSPTexture(p++, 0, 0, 0, G_TX_RENDERTILE, G_OFF);
 
 	gSPViewport(p++, &viewport);
 
@@ -222,34 +425,314 @@ static Gfx* BuildGraphicsTest(int x, int y, float angle) {
 	    p++, projectionMatrix,
 	    G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
 
-	gSPMatrix(
-	    p++, modelMatrix,
-	    G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+	for (std::size_t batchIndex = 0;
+	        batchIndex < asset.batches.size();
+	        ++batchIndex) {
 
-	const Gfx vertexLoad = {
-		gsSPVertex(vertices, 24, 0)
-		};
-	*p++ = vertexLoad;
+		const RomPreviewBatch& batch = asset.batches[batchIndex];
 
-	for (int face = 0; face < 6; ++face) {
-		const int base = face * 4;
+		RequireRange(batch.partIndex, 1, partTransforms.size());
 
-		gSP1Triangle(
-		    p++, base, base + 1, base + 2, 0);
+		gSPMatrix(
+		    p++,
+		    partMatrices[batch.partIndex],
+		    G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
 
-		gSP1Triangle(
-		    p++, base, base + 2, base + 3, 0);
-		}
+		gDPPipeSync(p++);
+
+		const bool translucent =
+		    (batch.state & (1u << 23)) != 0;
+
+		if (translucent) {
+			gDPSetRenderMode(
+			    p++, G_RM_ZB_XLU_SURF, G_RM_ZB_XLU_SURF2);
+			}
+		else {
+			gDPSetRenderMode(
+			    p++, G_RM_ZB_OPA_SURF, G_RM_ZB_OPA_SURF2);
+			}
+
+		uint32_t geometryMode = G_SHADE;
+
+		if ((batch.state & (1u << 17)) != 0) {
+			geometryMode |= G_SHADING_SMOOTH;
+			}
+
+		if ((batch.state & (1u << 19)) != 0) {
+			geometryMode |= G_CULL_FRONT;
+			}
+
+		if ((batch.state & (1u << 20)) != 0) {
+			geometryMode |= G_CULL_BACK;
+			}
+
+		if ((batch.state & (1u << 21)) != 0) {
+			geometryMode |= G_ZBUFFER;
+			}
+
+		gSPClearGeometryMode(p++, 0xFFFFFFFFu);
+		gSPSetGeometryMode(p++, geometryMode);
+
+		// Reset state explicitly so a previous textured batch cannot leak.
+		gSPTexture(p++, 0, 0, 0, G_TX_RENDERTILE, G_OFF);
+		gDPSetCombineMode(p++, G_CC_SHADE, G_CC_SHADE);
+
+		const uint32_t textureId = batch.state & 0xFFFu;
+
+		if (textureId != 0xFFFu) {
+			if ((textureId != 86u && textureId != 447u) ||
+			        modelTexture == nullptr) {
+				throw std::runtime_error(
+				    "Missing or unsupported batch texture.");
+				}
+
+			gDPSetTexturePersp(p++, G_TP_PERSP);
+			gDPSetTextureLOD(p++, G_TL_TILE);
+			gDPSetTextureDetail(p++, G_TD_CLAMP);
+			gDPSetTextureLUT(p++, G_TT_NONE);
+			gDPSetTextureFilter(p++, G_TF_BILERP);
+			gDPSetTextureConvert(p++, G_TC_FILT);
+
+			if (textureId == 86u) {
+				gDPSetCombineMode(
+				    p++, G_CC_MODULATEI, G_CC_MODULATEI);
+
+				gDPLoadTextureBlock_4b(
+				    p++,
+				    modelTexture->data(),
+				    G_IM_FMT_I,
+				    32,
+				    32,
+				    0,
+				    G_TX_CLAMP,
+				    G_TX_CLAMP,
+				    G_TX_NOMASK,
+				    G_TX_NOMASK,
+				    G_TX_NOLOD,
+				    G_TX_NOLOD);
+				}
+			else {
+				gDPSetCombineMode(
+				    p++, G_CC_MODULATEIDECALA, G_CC_MODULATEIDECALA);
+
+				gDPLoadTextureBlock(
+				    p++,
+				    modelTexture->data(),
+				    G_IM_FMT_IA,
+				    G_IM_SIZ_8b,
+				    32,
+				    64,
+				    0,
+				    G_TX_CLAMP,
+				    G_TX_CLAMP,
+				    G_TX_NOMASK,
+				    G_TX_NOMASK,
+				    G_TX_NOLOD,
+				    G_TX_NOLOD);
+				}
+
+			gSPTexture(
+			    p++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+			}
+
+		for (const PreviewDrawGroup& group : drawGroups) {
+			if (group.batchIndex != batchIndex) {
+				continue;
+				}
+
+			const Gfx vertexLoad = {
+				gsSPVertex(group.vertices.data(), group.vertexCount, 0)
+				};
+			*p++ = vertexLoad;
+
+			for (std::size_t v = 0; v < group.vertexCount; v += 3) {
+				gSP1Triangle(p++, v, v + 1, v + 2, 0);
+				} // End triangle loop.
+			} // End draw-group loop.
+		} // End material-batch loop.
+
+// Draw a 2x texture preview in the upper-left corner.
+	gDPPipeSync(p++);
+
+	gDPSetCycleType(p++, G_CYC_1CYCLE);
+	gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+	gDPSetAlphaCompare(p++, G_AC_NONE);
+
+	gDPSetTexturePersp(p++, G_TP_NONE);
+	gDPSetTextureLOD(p++, G_TL_TILE);
+	gDPSetTextureDetail(p++, G_TD_CLAMP);
+	gDPSetTextureLUT(p++, G_TT_NONE);
+	gDPSetTextureFilter(p++, G_TF_POINT);
+	gDPSetTextureConvert(p++, G_TC_FILT);
+
+	gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+
+	gDPLoadTextureBlock(
+	    p++,
+	    texture.data(),
+	    G_IM_FMT_RGBA,
+	    G_IM_SIZ_16b,
+	    32,
+	    64,
+	    0,
+	    G_TX_CLAMP,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD,
+	    G_TX_NOLOD);
+
+// Rectangle coordinates use two fractional bits.
+// Texture derivatives use ten fractional bits:
+// 512 means half a texel per screen pixel, giving 2x enlargement.
+	gSPTextureRectangle(
+	    p++,
+	    8 << 2,
+	    8 << 2,
+	    72 << 2,
+	    136 << 2,
+	    G_TX_RENDERTILE,
+	    0,
+	    0,
+	    512,
+	    512);
 
 	gDPPipeSync(p++);
+
+// Do not leave perspective correction disabled for later frames.
+	gDPSetTexturePersp(p++, G_TP_PERSP);
+
 	gDPFullSync(p++);
 	gSPEndDisplayList(p++);
 
 	return commands;
 	}
 
-int main() {
+int main(int argc, char* argv[]) {
 	try {
+		if (argc > 2) {
+			std::cerr << "Usage: " << argv[0] << " [model-id]\n";
+			return 1;
+			}
+
+		std::size_t modelId = 2;
+
+		if (argc == 2) {
+			const std::string_view argument(argv[1]);
+
+			if (argument.empty()) {
+				throw std::runtime_error(
+				    "Model ID must be a non-negative decimal integer.");
+				}
+
+			const auto parsed = std::from_chars(
+			                        argument.data(),
+			                        argument.data() + argument.size(),
+			                        modelId,
+			                        10);
+
+			if (parsed.ec != std::errc{} ||
+			        parsed.ptr != argument.data() + argument.size()) {
+				throw std::runtime_error(
+				    "Model ID must be a non-negative decimal integer.");
+				}
+			}
+
+		const RomPreviewModel loadedModel =
+		    LoadRomPreviewModel("baserom.us.z64", modelId);
+
+		const std::vector<Mtx4F> partTransforms =
+		    BuildPreviewPartTransforms(loadedModel);
+
+		const PreviewFraming framing =
+		    CalculatePreviewFraming(loadedModel, partTransforms);
+
+		std::cout << "Parts: " << loadedModel.parts.size() << '\n';
+
+		for (std::size_t i = 0; i < loadedModel.parts.size(); ++i) {
+			const RomPreviewPart& part = loadedModel.parts[i];
+			const Mtx4F& accumulated = partTransforms[i];
+
+			std::cout
+			        << "  Part " << i
+			        << ": depth=" << static_cast<unsigned int>(part.depth)
+			        << " firstBatch=" << part.firstBatch
+			        << " batches=" << part.batchCount
+			        << " assembled translation=("
+			        << accumulated.m[3][0] << ", "
+			        << accumulated.m[3][1] << ", "
+			        << accumulated.m[3][2] << ")\n";
+			}
+
+		const RomPreviewTexture2 loadedTexture =
+		    LoadRomPreviewTextureBytes("baserom.us.z64", 2);
+
+		bool hasModelTexture = false;
+		uint32_t loadedModelTextureId = 0xFFFu;
+		RomPreviewTexture2 modelTexture{};
+
+		for (const RomPreviewBatch& batch : loadedModel.batches) {
+			const uint32_t textureId = batch.state & 0xFFFu;
+
+			if (textureId == 0xFFFu) {
+				continue;
+				}
+
+			if (textureId != 86u && textureId != 447u) {
+				throw std::runtime_error(
+				    "A batch references an unsupported preview texture.");
+				}
+
+			if (hasModelTexture) {
+				if (textureId != loadedModelTextureId) {
+					throw std::runtime_error(
+					    "This preview still supports one unique model texture.");
+					}
+
+				continue;
+				}
+
+			modelTexture =
+			    LoadRomPreviewTextureBytes("baserom.us.z64", textureId);
+
+			loadedModelTextureId = textureId;
+			hasModelTexture = true;
+
+			std::cout
+			        << "Loaded model texture " << textureId << '\n';
+			}
+
+		const std::vector<PreviewDrawGroup> drawGroups =
+		    BuildPreviewDrawGroups(loadedModel);
+
+		std::cout << "Draw groups: " << drawGroups.size() << '\n';
+
+		std::cout << "Loaded ROM texture 2: 32x64 RGBA16\n";
+
+		std::cout
+		        << "Loaded ROM model " << modelId << ": "
+		        << loadedModel.vertices.size() << " vertices, "
+		        << loadedModel.triangles.size() << " triangles\n"
+		        << "Preview center: ("
+		        << framing.center[0] << ", "
+		        << framing.center[1] << ", "
+		        << framing.center[2] << "), scale="
+		        << framing.scale << '\n';
+
+		std::cout
+		        << "Material batches: " << loadedModel.batches.size() << '\n';
+
+		for (std::size_t i = 0; i < loadedModel.batches.size(); ++i) {
+			const RomPreviewBatch& batch = loadedModel.batches[i];
+
+			std::cout
+			        << "  Batch " << i
+			        << ": state=0x" << std::hex << batch.state << std::dec
+			        << " firstTriangle=" << batch.firstTriangle
+			        << " triangles=" << batch.triangleCount
+			        << '\n';
+			}
+
 		const auto assetPath =
 		    std::filesystem::absolute("host-assets");
 
@@ -452,7 +935,13 @@ int main() {
 			Gfx* graphicsTest = BuildGraphicsTest(
 			                        static_cast<int>(rectanglePosition.x),
 			                        static_cast<int>(rectanglePosition.y),
-			                        triangleAngle);
+			                        triangleAngle,
+			                        loadedModel,
+			                        framing,
+			                        loadedTexture,
+			                        hasModelTexture ? &modelTexture : nullptr,
+			                        drawGroups,
+			                        partTransforms);
 
 			window->DrawAndRunGraphicsCommands(
 			    graphicsTest, {}, {});
