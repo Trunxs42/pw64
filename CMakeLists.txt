@@ -138,3 +138,12 @@ target_link_libraries(pw64_host PRIVATE
 if(UNIX AND NOT APPLE)
     target_link_libraries(pw64_matrix_test PRIVATE m)
 endif()
+
+add_executable(pw64_asset_inspect
+    port/asset_inspect.cpp
+)
+
+set_target_properties(pw64_asset_inspect PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+)

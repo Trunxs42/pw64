@@ -1,5 +1,7 @@
 #include "common.h"
 #include <math.h>
+#include <math.h>
+#include <string.h>
 
 typedef struct {
     f64 d;
@@ -40,7 +42,7 @@ f32 uvSinF(f32 x) {
     s32 number;
     s32 ix;
 
-    ix = *(s32*)&x;
+    memcpy(&ix, &x, sizeof(ix));
 
     if (((ix >> 22) & 0x1FF) < 0xFF) {
         dx = x;
@@ -78,7 +80,9 @@ f32 uvSinF(f32 x) {
 }
 
 f32 uvCosF(f32 x) {
-    s32 ix = *(s32*)&x;
+    s32 ix;
+    memcpy(&ix, &x, sizeof(ix));
+
     f32 var_fv0;
     f64 fabsA0; // temp_fa0;
     f64 temp_fa1;
@@ -90,6 +94,8 @@ f32 uvCosF(f32 x) {
     f64 poly;
     f64 dx;
     f64 xsq;
+
+    // Keep the rest of the function unchanged.
 
     // mask off exponent + mantissa MSbit of f32
     if (((ix >> 22) & 0x1FF) < 0x136) {

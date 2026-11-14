@@ -7,6 +7,8 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <sstream>
+#include <iomanip>
 
 struct RomModelVertex {
 	std::array<int16_t, 3> position{};
@@ -229,9 +231,16 @@ inline RomPreviewModel LoadRomPreviewModel(
 	const uint32_t transparency = reader.U8();
 	const uint32_t auxiliaryCount = reader.U16();
 
+	// Experimental static previews of individually inspected layouts.
+// This does not establish general support for the header flag.
+	const bool supportedTransparencyHeader =
+	    transparency == 0 ||
+	    (transparency == 1 &&
+	     (modelId == 241 || modelId == 217));
+
 	if (vertexCount == 0 || vertexCount > 256 ||
 	        lodCount != 1 || matrixCount == 0 || matrixCount > 8 ||
-	        extraCount != 0 || transparency != 0 ||
+	        extraCount != 0 || !supportedTransparencyHeader ||
 	        auxiliaryCount != 0) {
 		throw std::runtime_error(
 		    "Model is outside the supported simple-preview profile.");
@@ -304,12 +313,34 @@ inline RomPreviewModel LoadRomPreviewModel(
 			    batch.state == 0x00720FFFu ||
 			    batch.state == 0x04F00FFFu ||
 			    batch.state == 0x00F001BFu ||
-			    batch.state == 0x00700056u;
+			    batch.state == 0x00700056u ||
+			    batch.state == 0x00720056u ||
+			    (modelId == 241 && batch.state == 0x04E00FFFu) ||
+			    (modelId == 217 && batch.state == 0x00600FFFu);
 
 			if (!supportedMaterial ||
 			        triangleCount > 128 || commandCount > 512) {
-				throw std::runtime_error(
-				    "Unsupported preview batch material or size.");
+
+				std::ostringstream message;
+
+				message
+				        << "Unsupported preview batch:"
+				        << " model=" << modelId
+				        << " part=" << partIndex
+				        << " stateIndex=" << stateIndex
+				        << " state=0x"
+				        << std::hex << std::setw(8) << std::setfill('0')
+				        << batch.state
+				        << std::dec
+				        << " transforms=" << transformCount
+				        << " triangles=" << triangleCount
+				        << " commands=" << commandCount
+				        << " materialSupported="
+				        << (supportedMaterial ? "yes" : "no")
+				        << " triangleLimit=128"
+				        << " commandLimit=512";
+
+				throw std::runtime_error(message.str());
 				}
 
 			std::array<int, 32> slots;
