@@ -10,6 +10,10 @@
 #include <sstream>
 #include <iomanip>
 
+inline constexpr std::size_t kPreviewMaxParts = 32;
+inline constexpr std::size_t kPreviewMaxBatches = 32;
+inline constexpr std::size_t kPreviewMaxStatesPerPart = 8;
+
 struct RomModelVertex {
 	std::array<int16_t, 3> position{};
 	uint16_t flag{};
@@ -239,7 +243,8 @@ inline RomPreviewModel LoadRomPreviewModel(
 	     (modelId == 241 || modelId == 217));
 
 	if (vertexCount == 0 || vertexCount > 256 ||
-	        lodCount != 1 || matrixCount == 0 || matrixCount > 8 ||
+	        lodCount != 1 ||
+	        matrixCount == 0 || matrixCount > kPreviewMaxParts ||
 	        extraCount != 0 || !supportedTransparencyHeader ||
 	        auxiliaryCount != 0) {
 		throw std::runtime_error(
@@ -269,14 +274,14 @@ inline RomPreviewModel LoadRomPreviewModel(
 	const uint32_t partCount = reader.U8();
 	const uint32_t billboard = reader.U8();
 
-	if (partCount == 0 || partCount > 8 ||
+	if (partCount == 0 || partCount > kPreviewMaxParts ||
 	        billboard != 0 || matrixCount != partCount) {
 		throw std::runtime_error(
 		    "Unsupported preview part/matrix layout.");
 		}
 
 	result.parts.reserve(partCount);
-	result.batches.reserve(8);
+	result.batches.reserve(kPreviewMaxBatches);
 
 	for (uint32_t partIndex = 0;
 	        partIndex < partCount;
@@ -286,9 +291,10 @@ inline RomPreviewModel LoadRomPreviewModel(
 		const uint32_t unknown5 = reader.U8();
 		const uint32_t depth = reader.U8();
 
-		if (stateCount == 0 || stateCount > 8 ||
-		        result.batches.size() + stateCount > 8 ||
-		        depth > 8) {
+		if (stateCount == 0 ||
+		        stateCount > kPreviewMaxStatesPerPart ||
+		        result.batches.size() + stateCount > kPreviewMaxBatches ||
+		        depth >= kPreviewMaxParts) {
 			throw std::runtime_error(
 			    "Unsupported preview part properties or batch count.");
 			}
@@ -316,7 +322,16 @@ inline RomPreviewModel LoadRomPreviewModel(
 			    batch.state == 0x00700056u ||
 			    batch.state == 0x00720056u ||
 			    (modelId == 241 && batch.state == 0x04E00FFFu) ||
-			    (modelId == 217 && batch.state == 0x00600FFFu);
+			    (modelId == 217 && batch.state == 0x00600FFFu) ||
+			    (modelId == 272 &&
+			     (batch.state == 0x00720066u ||
+			      batch.state == 0x00620FFFu ||
+			      batch.state == 0x01F001A8u ||
+			      batch.state == 0x007201AAu ||
+			      batch.state == 0x007201A6u ||
+			      batch.state == 0x007201A5u ||
+			      batch.state == 0x007201A4u ||
+			      batch.state == 0x007201A3u));
 
 			if (!supportedMaterial ||
 			        triangleCount > 128 || commandCount > 512) {

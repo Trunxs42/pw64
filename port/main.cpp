@@ -17,6 +17,8 @@
 #include <system_error>
 #include <array>
 #include <vector>
+#include <map>
+#include <string>
 
 #include "fast/Fast3dWindow.h"
 #include "libultraship/libultra/gbi.h"
@@ -31,12 +33,15 @@ extern "C" {
 #include <uv_matrix.h>
 	}
 
+using PreviewModelTextures =
+    std::map<uint32_t, RomPreviewTexture2>;
+
 static std::vector<Mtx4F> BuildPreviewPartTransforms(
     const RomPreviewModel& asset) {
 
 	if (asset.parts.empty() ||
 	        asset.parts.size() != asset.matrices.size() ||
-	        asset.parts.size() > 8) {
+	        asset.parts.size() > kPreviewMaxParts) {
 		throw std::runtime_error(
 		    "Invalid preview part/matrix counts.");
 		}
@@ -288,12 +293,141 @@ static std::vector<PreviewDrawGroup> BuildPreviewDrawGroups(
 	return groups;
 	}
 
+static void BindAdditionalPreviewTexture(
+    Gfx*& p,
+    uint32_t textureId,
+    const RomPreviewTexture2& texture) {
+
+	const RomPreviewTextureSpec spec =
+	    GetRomPreviewTextureSpec(textureId);
+
+	if (textureId == 102u) {
+		gDPSetCombineMode(
+		    p++, G_CC_MODULATEI, G_CC_MODULATEI);
+
+		gDPLoadTextureBlock_4b(
+		    p++,
+		    texture.data(),
+		    G_IM_FMT_I,
+		    16,
+		    2,
+		    0,
+		    G_TX_CLAMP,
+		    G_TX_CLAMP,
+		    G_TX_NOMASK,
+		    G_TX_NOMASK,
+		    G_TX_NOLOD,
+		    G_TX_NOLOD);
+
+		return;
+		}
+
+	const bool isIA8 = textureId == 424u;
+
+	const bool isRGBA16 =
+	    textureId == 419u ||
+	    textureId == 420u ||
+	    textureId == 421u ||
+	    textureId == 422u ||
+	    textureId == 426u;
+
+	if (!isIA8 && !isRGBA16) {
+		throw std::runtime_error(
+		    "Unsupported additional texture binding.");
+		}
+
+	const uint32_t format =
+	    isIA8 ? G_IM_FMT_IA : G_IM_FMT_RGBA;
+
+	const uint32_t size =
+	    isIA8 ? G_IM_SIZ_8b : G_IM_SIZ_16b;
+
+	const std::size_t bytesPerTexel =
+	    isIA8 ? 1 : 2;
+
+	const std::size_t baseImageBytes =
+	    spec.rowBytes * spec.height;
+
+	RequireRange(0, baseImageBytes, texture.size());
+
+	if (isIA8) {
+		gDPSetCombineMode(
+		    p++,
+		    G_CC_MODULATEIDECALA,
+		    G_CC_MODULATEIDECALA);
+		}
+	else {
+		gDPSetCombineMode(
+		    p++,
+		    G_CC_MODULATERGBA,
+		    G_CC_MODULATERGBA);
+		}
+
+	// Preserve the stored row stride, including padding.
+	gDPSetTextureImage(
+	    p++,
+	    format,
+	    size,
+	    spec.rowBytes / bytesPerTexel,
+	    texture.data());
+
+	gDPSetTile(
+	    p++,
+	    format,
+	    size,
+	    0,
+	    0,
+	    G_TX_LOADTILE,
+	    0,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD);
+
+	gDPLoadSync(p++);
+
+	gDPLoadBlock(
+	    p++,
+	    G_TX_LOADTILE,
+	    0,
+	    0,
+	    baseImageBytes / bytesPerTexel - 1,
+	    0);
+
+	gDPPipeSync(p++);
+
+	gDPSetTile(
+	    p++,
+	    format,
+	    size,
+	    spec.rowBytes / 8,
+	    0,
+	    G_TX_RENDERTILE,
+	    0,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD);
+
+	gDPSetTileSize(
+	    p++,
+	    G_TX_RENDERTILE,
+	    0,
+	    0,
+	    (spec.width - 1) << G_TEXTURE_IMAGE_FRAC,
+	    (spec.height - 1) << G_TEXTURE_IMAGE_FRAC);
+	}
+
 static Gfx* BuildGraphicsTest(
     int x, int y, float angle,
     const RomPreviewModel& asset,
     const PreviewFraming& framing,
     const RomPreviewTexture2& texture,
-    const RomPreviewTexture2* modelTexture,
+    const PreviewModelTextures& modelTextures,
     const std::vector<PreviewDrawGroup>& drawGroups,
     const std::vector<Mtx4F>& partTransforms) {
 	static Gfx commands[4096] {};
@@ -302,7 +436,7 @@ static Gfx* BuildGraphicsTest(
 
 	// Persistent packed matrices used by the display list.
 	alignas(8) static uint32_t projectionMatrix[16] {};
-	alignas(8) static uint32_t partMatrices[8][16] {};
+	alignas(8) static uint32_t partMatrices[kPreviewMaxParts][16] {};
 
 	Mtx4F projection{};
 	Mtx4F model{};
@@ -341,7 +475,8 @@ static Gfx* BuildGraphicsTest(
 	PackHostMatrix(projectionMatrix, projection);
 
 	if (partTransforms.size() != asset.parts.size() ||
-	        partTransforms.empty() || partTransforms.size() > 8) {
+	        partTransforms.empty() ||
+	        partTransforms.size() > kPreviewMaxParts) {
 		throw std::runtime_error(
 		    "Invalid renderer part transforms.");
 		}
@@ -366,6 +501,50 @@ static Gfx* BuildGraphicsTest(
 	viewport.vp.vtrans[1] = 120 * 4;
 	viewport.vp.vtrans[2] = G_MAXZ / 2;
 	viewport.vp.vtrans[3] = 0;
+
+	if (asset.batches.size() > kPreviewMaxBatches) {
+		throw std::runtime_error(
+		    "Renderer batch capacity exceeded.");
+		}
+
+// Conservative budget for the current renderer:
+// fixed frame/overlay setup, material setup, and geometry.
+// Revisit the material budget when adding mipmapped commands.
+	constexpr std::size_t fixedCommandBudget = 128;
+	constexpr std::size_t commandsPerBatchBudget = 64;
+	constexpr std::size_t commandCapacity =
+	    sizeof(commands) / sizeof(commands[0]);
+
+	std::size_t commandBudget =
+	    fixedCommandBudget +
+	    asset.batches.size() * commandsPerBatchBudget;
+
+	for (const PreviewDrawGroup& group : drawGroups) {
+		RequireRange(group.batchIndex, 1, asset.batches.size());
+
+		if (group.vertexCount == 0 ||
+		        group.vertexCount > group.vertices.size() ||
+		        group.vertexCount % 3 != 0) {
+			throw std::runtime_error(
+			    "Invalid preview draw-group size.");
+			}
+
+		const std::size_t groupCommands =
+		    1 + group.vertexCount / 3;
+
+		if (commandBudget > commandCapacity ||
+		        groupCommands > commandCapacity - commandBudget) {
+			throw std::runtime_error(
+			    "Preview display-list capacity exceeded.");
+			}
+
+		commandBudget += groupCommands;
+		}
+
+	if (commandBudget > commandCapacity) {
+		throw std::runtime_error(
+		    "Preview display-list capacity exceeded.");
+		}
 
 	Gfx* p = commands;
 
@@ -443,7 +622,21 @@ static Gfx* BuildGraphicsTest(
 		const bool translucent =
 		    (batch.state & (1u << 23)) != 0;
 
-		if (translucent) {
+		const bool decal =
+		    (batch.state & (1u << 24)) != 0;
+
+		if (decal) {
+			if (!translucent) {
+				throw std::runtime_error(
+				    "Opaque decal preview is not enabled.");
+				}
+
+			gDPSetRenderMode(
+			    p++,
+			    G_RM_ZB_XLU_DECAL,
+			    G_RM_ZB_XLU_DECAL2);
+			}
+		else if (translucent) {
 			gDPSetRenderMode(
 			    p++, G_RM_ZB_XLU_SURF, G_RM_ZB_XLU_SURF2);
 			}
@@ -480,11 +673,17 @@ static Gfx* BuildGraphicsTest(
 		const uint32_t textureId = batch.state & 0xFFFu;
 
 		if (textureId != 0xFFFu) {
-			if ((textureId != 86u && textureId != 447u) ||
-			        modelTexture == nullptr) {
+			GetRomPreviewTextureSpec(textureId);
+
+			const auto entry = modelTextures.find(textureId);
+
+			if (entry == modelTextures.end()) {
 				throw std::runtime_error(
-				    "Missing or unsupported batch texture.");
+				    "Missing loaded batch texture ID: " +
+				    std::to_string(textureId));
 				}
+
+			const RomPreviewTexture2* modelTexture = &entry->second;
 
 			gDPSetTexturePersp(p++, G_TP_PERSP);
 			gDPSetTextureLOD(p++, G_TL_TILE);
@@ -511,7 +710,7 @@ static Gfx* BuildGraphicsTest(
 				    G_TX_NOLOD,
 				    G_TX_NOLOD);
 				}
-			else {
+			else if (textureId == 447u) {
 				gDPSetCombineMode(
 				    p++, G_CC_MODULATEIDECALA, G_CC_MODULATEIDECALA);
 
@@ -529,6 +728,11 @@ static Gfx* BuildGraphicsTest(
 				    G_TX_NOMASK,
 				    G_TX_NOLOD,
 				    G_TX_NOLOD);
+				}
+
+			else {
+				BindAdditionalPreviewTexture(
+				    p, textureId, *modelTexture);
 				}
 
 			gSPTexture(
@@ -667,9 +871,7 @@ int main(int argc, char* argv[]) {
 		const RomPreviewTexture2 loadedTexture =
 		    LoadRomPreviewTextureBytes("baserom.us.z64", 2);
 
-		bool hasModelTexture = false;
-		uint32_t loadedModelTextureId = 0xFFFu;
-		RomPreviewTexture2 modelTexture{};
+		PreviewModelTextures modelTextures;
 
 		for (const RomPreviewBatch& batch : loadedModel.batches) {
 			const uint32_t textureId = batch.state & 0xFFFu;
@@ -678,29 +880,23 @@ int main(int argc, char* argv[]) {
 				continue;
 				}
 
-			if (textureId != 86u && textureId != 447u) {
-				throw std::runtime_error(
-				    "A batch references an unsupported preview texture.");
-				}
+			GetRomPreviewTextureSpec(textureId);
 
-			if (hasModelTexture) {
-				if (textureId != loadedModelTextureId) {
-					throw std::runtime_error(
-					    "This preview still supports one unique model texture.");
-					}
-
+			if (modelTextures.find(textureId) != modelTextures.end()) {
 				continue;
 				}
 
-			modelTexture =
-			    LoadRomPreviewTextureBytes("baserom.us.z64", textureId);
-
-			loadedModelTextureId = textureId;
-			hasModelTexture = true;
+			modelTextures.emplace(
+			                 textureId,
+			                 LoadRomPreviewTextureBytes("baserom.us.z64", textureId));
 
 			std::cout
 			        << "Loaded model texture " << textureId << '\n';
 			}
+
+		std::cout
+		        << "Unique model textures: "
+		        << modelTextures.size() << '\n';
 
 		const std::vector<PreviewDrawGroup> drawGroups =
 		    BuildPreviewDrawGroups(loadedModel);
@@ -939,7 +1135,7 @@ int main(int argc, char* argv[]) {
 			                        loadedModel,
 			                        framing,
 			                        loadedTexture,
-			                        hasModelTexture ? &modelTexture : nullptr,
+			                        modelTextures,
 			                        drawGroups,
 			                        partTransforms);
 
