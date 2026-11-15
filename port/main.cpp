@@ -8,6 +8,7 @@
 #include "controller_host.h"
 #include <algorithm>
 #include "rom_model.h"
+#include "rom_contour.h"
 #include "rom_texture.h"
 #include <algorithm>
 #include <charconv>
@@ -814,19 +815,33 @@ static Gfx* BuildGraphicsTest(
 
 int main(int argc, char* argv[]) {
 	try {
-		if (argc > 2) {
-			std::cerr << "Usage: " << argv[0] << " [model-id]\n";
+		const bool contourPreview =
+		    argc == 3 &&
+		    std::string_view(argv[1]) == "--contour";
+
+		const bool terrainPreview =
+		    argc == 3 &&
+		    std::string_view(argv[1]) == "--terrain";
+
+		if (argc != 1 && argc != 2 &&
+		        !contourPreview && !terrainPreview) {
+
+			std::cerr
+			        << "Usage: " << argv[0] << " [model-id]\n"
+			        << "       " << argv[0] << " --contour 3\n"
+			        << "       " << argv[0] << " --terrain 0\n";
 			return 1;
 			}
 
 		std::size_t modelId = 2;
 
-		if (argc == 2) {
-			const std::string_view argument(argv[1]);
+		if (argc >= 2) {
+			const std::string_view argument(
+			    argv[(contourPreview || terrainPreview) ? 2 : 1]);
 
 			if (argument.empty()) {
 				throw std::runtime_error(
-				    "Model ID must be a non-negative decimal integer.");
+				    "Asset ID must be a non-negative decimal integer.");
 				}
 
 			const auto parsed = std::from_chars(
@@ -837,13 +852,23 @@ int main(int argc, char* argv[]) {
 
 			if (parsed.ec != std::errc{} ||
 			        parsed.ptr != argument.data() + argument.size()) {
+
 				throw std::runtime_error(
-				    "Model ID must be a non-negative decimal integer.");
+				    "Asset ID must be a non-negative decimal integer.");
 				}
 			}
 
+		if (contourPreview && modelId != 3) {
+			throw std::runtime_error(
+			    "The standalone contour regression mode remains limited to 3.");
+			}
+
 		const RomPreviewModel loadedModel =
-		    LoadRomPreviewModel("baserom.us.z64", modelId);
+		    terrainPreview
+		    ? LoadRomTerrainDiagnostic("baserom.us.z64", modelId)
+		    : contourPreview
+		    ? LoadRomContourDiagnostic("baserom.us.z64", modelId)
+		    : LoadRomPreviewModel("baserom.us.z64", modelId);
 
 		const std::vector<Mtx4F> partTransforms =
 		    BuildPreviewPartTransforms(loadedModel);
@@ -906,7 +931,12 @@ int main(int argc, char* argv[]) {
 		std::cout << "Loaded ROM texture 2: 32x64 RGBA16\n";
 
 		std::cout
-		        << "Loaded ROM model " << modelId << ": "
+		        << (terrainPreview
+		            ? "Loaded ROM terrain diagnostic "
+		            : contourPreview
+		            ? "Loaded ROM contour diagnostic "
+		            : "Loaded ROM model ")
+		        << modelId << ": "
 		        << loadedModel.vertices.size() << " vertices, "
 		        << loadedModel.triangles.size() << " triangles\n"
 		        << "Preview center: ("
