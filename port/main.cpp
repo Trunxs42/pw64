@@ -99,6 +99,12 @@ struct PreviewFraming {
 	float scale = 1.0f;
 	};
 
+struct TerrainPreviewCamera {
+	float yaw = 0.0f;
+	float tilt = -0.65f;
+	float distance = 4.0f;
+	};
+
 static PreviewFraming CalculatePreviewFraming(
     const RomPreviewModel& asset,
     const std::vector<Mtx4F>& partTransforms) {
@@ -572,7 +578,8 @@ static Gfx* BuildGraphicsTest(
     const PreviewModelTextures& modelTextures,
     const std::vector<PreviewDrawGroup>& drawGroups,
     const std::vector<Mtx4F>& partTransforms,
-    bool terrainView) {
+    bool terrainView,
+    const TerrainPreviewCamera& terrainCamera) {
 	static Gfx commands[16384] {};
 	alignas(8) static uint16_t colorBuffer[320 * 240] {};
 	alignas(8) static uint16_t depthBuffer[320 * 240] {};
@@ -595,18 +602,24 @@ static Gfx* BuildGraphicsTest(
 	    -1.0f, 1.0f,
 	    1.0f, 10.0f);
 
-// Position the triangle in front of the camera.
 	uvMat4SetIdentity(&model);
-	uvMat4LocalTranslate(&model, 0.0f, 0.0f, -4.0f);
+
+	const float viewDistance =
+	    terrainView ? terrainCamera.distance : 4.0f;
+
+	uvMat4LocalTranslate(
+	    &model, 0.0f, 0.0f, -viewDistance);
 
 	if (terrainView) {
-		// Fixed oblique diagnostic view, in radians.
-		constexpr float terrainTilt = -0.65f;
+		uvMat4RotateAxis(
+		    &model, terrainCamera.tilt, 'x');
 
-		uvMat4RotateAxis(&model, terrainTilt, 'x');
+		// Terrain cells are arranged in the XY plane.
+		uvMat4RotateAxis(
+		    &model, terrainCamera.yaw, 'z');
 		}
 	else {
-		// Preserve the existing rotating model/contour previews.
+		// Preserve the existing model/contour rotation.
 		uvMat4RotateAxis(&model, angle, 'x');
 		uvMat4RotateAxis(&model, angle, 'y');
 		}
@@ -1246,6 +1259,17 @@ int main(int argc, char* argv[]) {
 
 		float triangleAngle = 0.0f;
 
+		TerrainPreviewCamera terrainCamera;
+
+		if (terrainPreview) {
+			std::cout
+			        << "Terrain camera controls:\n"
+			        << "  Stick: orbit and tilt\n"
+			        << "  R: zoom in\n"
+			        << "  Z: zoom out\n"
+			        << "  Start: reset view\n";
+			}
+
 		Vec3F rectanglePosition{};
 		rectanglePosition.x = 128.0f;
 		rectanglePosition.y = 96.0f;
@@ -1290,6 +1314,62 @@ int main(int argc, char* argv[]) {
 
 			// Clamp before using dt for either animation or movement.
 			dt = std::clamp(dt, 0.0f, 0.05f);
+
+			if (terrainPreview) {
+				auto cameraAxis = [](float value) {
+					value = std::clamp(value, -1.0f, 1.0f);
+
+					constexpr float deadzone = 0.15f;
+
+					if (std::fabs(value) <= deadzone) {
+						return 0.0f;
+						}
+
+					const float magnitude =
+					    (std::fabs(value) - deadzone) /
+					    (1.0f - deadzone);
+
+					return std::copysign(magnitude, value);
+					};
+
+				const float horizontal =
+				    cameraAxis(uvControllerGetStick(0, 0));
+
+				const float vertical =
+				    cameraAxis(uvControllerGetStick(0, 1));
+
+				constexpr float orbitSpeed = 1.2f;
+				constexpr float tiltSpeed = 0.8f;
+				constexpr float zoomSpeed = 1.5f;
+				constexpr float cameraTwoPi = 6.2831853f;
+
+				terrainCamera.yaw +=
+				    horizontal * orbitSpeed * dt;
+
+				terrainCamera.yaw = std::remainder(
+				                        terrainCamera.yaw, cameraTwoPi);
+
+				terrainCamera.tilt = std::clamp(
+				                         terrainCamera.tilt + vertical * tiltSpeed * dt,
+				                         -1.35f,
+				                         0.0f);
+
+				const uint16_t buttons = hostPads[0].button;
+
+				const float zoomDirection =
+				    ((buttons & Z_TRIG) != 0 ? 1.0f : 0.0f) -
+				    ((buttons & R_TRIG) != 0 ? 1.0f : 0.0f);
+
+				terrainCamera.distance = std::clamp(
+				                             terrainCamera.distance +
+				                             zoomDirection * zoomSpeed * dt,
+				                             2.75f,
+				                             7.0f);
+
+				if ((buttons & START_BUTTON) != 0) {
+					terrainCamera = TerrainPreviewCamera{};
+					}
+				}
 
 			constexpr float twoPi = 6.2831853f;
 			constexpr float angularSpeed = 1.0f;
@@ -1338,7 +1418,8 @@ int main(int argc, char* argv[]) {
 			                        modelTextures,
 			                        drawGroups,
 			                        partTransforms,
-			                        terrainPreview);
+			                        terrainPreview,
+			                        terrainCamera);
 
 			window->DrawAndRunGraphicsCommands(
 			    graphicsTest, {}, {});

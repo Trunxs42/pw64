@@ -35,9 +35,13 @@ inline bool IsTerrainBaseTextureSupported(uint32_t textureId) {
 		case 19:
 		case 20:
 		case 21:
+		case 22:
 		case 23:
+		case 24:
+		case 26:
 		case 28:
 		case 29:
+		case 30:
 		case 32:
 		case 36:
 		case 51:
@@ -120,10 +124,28 @@ inline RomPreviewTextureSpec GetRomPreviewTextureSpec(
 				0xF5101000u, 0x01014050u, 64, true
 				};
 
+		case 22:
+			return {
+				32, 32, 2744, 28, 13,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
 		case 23:
 			return {
 				64, 32, 4096, 13, 10,
 				0xF5102000u, 0x01014060u, 128, false
+				};
+
+		case 24:
+			return {
+				32, 32, 2048, 14, 11,
+				0xF5101000u, 0x01014250u, 64, false
+				};
+
+		case 26:
+			return {
+				64, 64, 2048, 14, 11,
+				0xF5800800u, 0x01018060u, 32, false
 				};
 
 		case 28:
@@ -136,6 +158,12 @@ inline RomPreviewTextureSpec GetRomPreviewTextureSpec(
 			return {
 				32, 32, 2744, 25, 12,
 				0xF5101000u, 0x01080050u, 64, true
+				};
+
+		case 30:
+			return {
+				16, 64, 2048, 20, 11,
+				0xF5100800u, 0x01018240u, 32, false
 				};
 
 		case 32:
@@ -362,30 +390,112 @@ inline RomPreviewTexture2 LoadRomPreviewTextureBytes(
 		    std::to_string(textureId));
 		}
 
-	const uint32_t sizeWord0 =
-	    ReadBE32(texture, tileOffset + 8);
+	if (textureId == 24 || textureId == 26) {
+		// These inspected streams contain a second tile descriptor
+		// instead of an immediately following tile-size command.
+		RequireRange(spec.tileCommand, 3, commandCount);
 
-	const uint32_t sizeWord1 =
-	    ReadBE32(texture, tileOffset + 12);
+		const uint32_t expectedSecondTileWord0 =
+		    textureId == 24
+		    ? 0xF5101000u
+		    : 0xF5800800u;
 
-	const uint32_t expectedSizeWord1 =
-	    (1u << 24) |
-	    (((spec.width - 1u) * 4u) << 12) |
-	    ((spec.height - 1u) * 4u);
+		const uint32_t expectedSecondTileWord1 =
+		    textureId == 24
+		    ? 0x00014650u
+		    : 0x00018461u;
 
-	if (sizeWord0 != 0xF2000000u ||
-	        sizeWord1 != expectedSizeWord1) {
-		throw std::runtime_error(
-		    "Texture base-tile dimensions differ from inspection: " +
-		    std::to_string(textureId));
+		if (ReadBE32(texture, tileOffset + 8) !=
+		        expectedSecondTileWord0 ||
+		        ReadBE32(texture, tileOffset + 12) !=
+		        expectedSecondTileWord1 ||
+		        ReadBE32(texture, tileOffset + 16) !=
+		        0xB8000000u ||
+		        ReadBE32(texture, tileOffset + 20) != 0) {
+
+			throw std::runtime_error(
+			    "Texture alternate tile layout differs from inspection: " +
+			    std::to_string(textureId));
+			}
+		}
+	else {
+		const uint32_t sizeWord0 =
+		    ReadBE32(texture, tileOffset + 8);
+
+		const uint32_t sizeWord1 =
+		    ReadBE32(texture, tileOffset + 12);
+
+		const uint32_t expectedSizeWord1 =
+		    (1u << 24) |
+		    (((spec.width - 1u) * 4u) << 12) |
+		    ((spec.height - 1u) * 4u);
+
+		if (sizeWord0 != 0xF2000000u ||
+		        sizeWord1 != expectedSizeWord1) {
+
+			throw std::runtime_error(
+			    "Texture base-tile dimensions differ from inspection: " +
+			    std::to_string(textureId));
+			}
+		}
+
+	const bool inspectedSelfReference =
+	    textureId == 22 ||
+	    textureId == 24 ||
+	    textureId == 26;
+
+	uint32_t expectedSecondaryImage = 0xFFFu;
+
+	if (inspectedSelfReference) {
+		expectedSecondaryImage =
+		    static_cast<uint32_t>(textureId);
+		}
+	else if (textureId == 30) {
+		expectedSecondaryImage = 26u;
 		}
 
 	if (textureId != 2 &&
 	        ((read16At(metadataOffset + 7) & 0xFFFu) != textureId ||
-	         read16At(metadataOffset + 9) != 0xFFFu)) {
+	         read16At(metadataOffset + 9) != expectedSecondaryImage)) {
+
 		throw std::runtime_error(
 		    "Texture has unexpected image dependencies: " +
 		    std::to_string(textureId));
+		}
+
+	if (textureId == 30) {
+		// Validate the recorded secondary-image setup.
+		// This checkpoint does not execute it.
+		constexpr std::array<std::array<uint32_t, 2>, 7>
+		expectedTail{{
+					{0xE8000000u, 0x00000000u},
+					{0xE6000000u, 0x00000000u},
+					{0xFD900000u, 0x00000000u},
+					{0xF5900100u, 0x07018060u},
+					{0xF3000000u, 0x073FF000u},
+					{0xF5800900u, 0x0001B86Eu},
+					{0xB8000000u, 0x00000000u}
+				}};
+
+		constexpr std::size_t firstTailCommand = 13;
+
+		RequireRange(
+		    firstTailCommand,
+		    expectedTail.size(),
+		    commandCount);
+
+		for (std::size_t i = 0; i < expectedTail.size(); ++i) {
+			const std::size_t position =
+			    commandOffset + (firstTailCommand + i) * 8;
+
+			if (ReadBE32(texture, position) != expectedTail[i][0] ||
+			        ReadBE32(texture, position + 4) != expectedTail[i][1]) {
+
+				throw std::runtime_error(
+				    "Texture 30 secondary-image commands "
+				    "differ from inspection.");
+				}
+			}
 		}
 
 	const std::size_t baseImageBytes =
