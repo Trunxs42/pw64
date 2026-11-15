@@ -423,6 +423,147 @@ static void BindAdditionalPreviewTexture(
 	    (spec.height - 1) << G_TEXTURE_IMAGE_FRAC);
 	}
 
+static void BindTerrainBaseTexture(
+    Gfx*& p,
+    uint32_t textureId,
+    const RomPreviewTexture2& texture) {
+
+	if (!IsTerrainBaseTextureSupported(textureId)) {
+		throw std::runtime_error(
+		    "Unsupported terrain texture binding.");
+		}
+
+	const RomPreviewTextureSpec spec =
+	    GetRomPreviewTextureSpec(textureId);
+
+	const uint32_t format =
+	    (spec.tileWord0 >> 21) & 7u;
+
+	const uint32_t size =
+	    (spec.tileWord0 >> 19) & 3u;
+
+	const uint32_t palette =
+	    (spec.tileWord1 >> 20) & 15u;
+
+	const uint32_t clampMirrorT =
+	    (spec.tileWord1 >> 18) & 3u;
+
+	const uint32_t maskT =
+	    (spec.tileWord1 >> 14) & 15u;
+
+	const uint32_t clampMirrorS =
+	    (spec.tileWord1 >> 8) & 3u;
+
+	const uint32_t maskS =
+	    (spec.tileWord1 >> 4) & 15u;
+
+	const bool rgba16 =
+	    format == G_IM_FMT_RGBA &&
+	    size == G_IM_SIZ_16b;
+
+	const bool intensity =
+	    format == G_IM_FMT_I &&
+	    (size == G_IM_SIZ_4b ||
+	     size == G_IM_SIZ_8b);
+
+	if (!rgba16 && !intensity) {
+		throw std::runtime_error(
+		    "Unsupported terrain texture format.");
+		}
+
+	const std::size_t baseImageBytes =
+	    spec.rowBytes * spec.height;
+
+	RequireRange(0, baseImageBytes, texture.size());
+
+	if (baseImageBytes == 0 ||
+	        baseImageBytes > 4096 ||
+	        baseImageBytes % 2 != 0 ||
+	        spec.rowBytes == 0 ||
+	        spec.rowBytes % 8 != 0) {
+
+		throw std::runtime_error(
+		    "Invalid terrain base-image layout.");
+		}
+
+	gDPSetTexturePersp(p++, G_TP_PERSP);
+	gDPSetTextureLOD(p++, G_TL_TILE);
+	gDPSetTextureDetail(p++, G_TD_CLAMP);
+	gDPSetTextureLUT(p++, G_TT_NONE);
+	gDPSetTextureFilter(p++, G_TF_BILERP);
+	gDPSetTextureConvert(p++, G_TC_FILT);
+
+	if (rgba16) {
+		gDPSetCombineMode(
+		    p++, G_CC_MODULATERGBA, G_CC_MODULATERGBA);
+		}
+	else {
+		gDPSetCombineMode(
+		    p++, G_CC_MODULATEI, G_CC_MODULATEI);
+		}
+
+	// Transfer the normalized base image as 16-bit units.
+	// Its actual sampling format is restored below.
+	gDPSetTextureImage(
+	    p++,
+	    format,
+	    G_IM_SIZ_16b,
+	    1,
+	    texture.data());
+
+	gDPSetTile(
+	    p++,
+	    format,
+	    G_IM_SIZ_16b,
+	    0,
+	    0,
+	    G_TX_LOADTILE,
+	    0,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD,
+	    G_TX_CLAMP,
+	    G_TX_NOMASK,
+	    G_TX_NOLOD);
+
+	gDPLoadSync(p++);
+
+	gDPLoadBlock(
+	    p++,
+	    G_TX_LOADTILE,
+	    0,
+	    0,
+	    baseImageBytes / 2 - 1,
+	    0);
+
+	gDPPipeSync(p++);
+
+	// Remap the recorded base level onto render tile 0.
+	// Base-level sampling uses no mip-level coordinate shifts.
+	gDPSetTile(
+	    p++,
+	    format,
+	    size,
+	    spec.rowBytes / 8,
+	    0,
+	    G_TX_RENDERTILE,
+	    palette,
+	    clampMirrorT,
+	    maskT,
+	    G_TX_NOLOD,
+	    clampMirrorS,
+	    maskS,
+	    G_TX_NOLOD);
+
+	gDPSetTileSize(
+	    p++,
+	    G_TX_RENDERTILE,
+	    0,
+	    0,
+	    (spec.width - 1) << G_TEXTURE_IMAGE_FRAC,
+	    (spec.height - 1) << G_TEXTURE_IMAGE_FRAC);
+	}
+
 static Gfx* BuildGraphicsTest(
     int x, int y, float angle,
     const RomPreviewModel& asset,
@@ -430,8 +571,9 @@ static Gfx* BuildGraphicsTest(
     const RomPreviewTexture2& texture,
     const PreviewModelTextures& modelTextures,
     const std::vector<PreviewDrawGroup>& drawGroups,
-    const std::vector<Mtx4F>& partTransforms) {
-	static Gfx commands[4096] {};
+    const std::vector<Mtx4F>& partTransforms,
+    bool terrainView) {
+	static Gfx commands[16384] {};
 	alignas(8) static uint16_t colorBuffer[320 * 240] {};
 	alignas(8) static uint16_t depthBuffer[320 * 240] {};
 
@@ -457,9 +599,17 @@ static Gfx* BuildGraphicsTest(
 	uvMat4SetIdentity(&model);
 	uvMat4LocalTranslate(&model, 0.0f, 0.0f, -4.0f);
 
-// Rotate around two axes so its 3D orientation is visible.
-	uvMat4RotateAxis(&model, angle, 'x');
-	uvMat4RotateAxis(&model, angle, 'y');
+	if (terrainView) {
+		// Fixed oblique diagnostic view, in radians.
+		constexpr float terrainTilt = -0.65f;
+
+		uvMat4RotateAxis(&model, terrainTilt, 'x');
+		}
+	else {
+		// Preserve the existing rotating model/contour previews.
+		uvMat4RotateAxis(&model, angle, 'x');
+		uvMat4RotateAxis(&model, angle, 'y');
+		}
 
 	uvMat4Scale(
 	    &model,
@@ -503,7 +653,11 @@ static Gfx* BuildGraphicsTest(
 	viewport.vp.vtrans[2] = G_MAXZ / 2;
 	viewport.vp.vtrans[3] = 0;
 
-	if (asset.batches.size() > kPreviewMaxBatches) {
+	const std::size_t rendererBatchLimit =
+	    terrainView ? std::size_t{128} :
+	    kPreviewMaxBatches;
+
+	if (asset.batches.size() > rendererBatchLimit) {
 		throw std::runtime_error(
 		    "Renderer batch capacity exceeded.");
 		}
@@ -584,13 +738,16 @@ static Gfx* BuildGraphicsTest(
 
 	gDPPipeSync(p++);
 
-	// Preserve the controllable orange rectangle.
-	const uint32_t rectangle =
-	    GPACK_RGBA5551(255, 160, 32, 1);
+	if (!terrainView) {
+		const uint32_t rectangle =
+		    GPACK_RGBA5551(255, 160, 32, 1);
 
-	gDPSetFillColor(
-	    p++, (rectangle << 16) | rectangle);
-	gDPFillRectangle(p++, x, y, x + 63, y + 47);
+		gDPSetFillColor(
+		    p++, (rectangle << 16) | rectangle);
+
+		gDPFillRectangle(
+		    p++, x, y, x + 63, y + 47);
+		}
 
 	gDPPipeSync(p++);
 
@@ -693,7 +850,11 @@ static Gfx* BuildGraphicsTest(
 			gDPSetTextureFilter(p++, G_TF_BILERP);
 			gDPSetTextureConvert(p++, G_TC_FILT);
 
-			if (textureId == 86u) {
+			if (terrainView) {
+				BindTerrainBaseTexture(
+				    p, textureId, *modelTexture);
+				}
+			else if (textureId == 86u) {
 				gDPSetCombineMode(
 				    p++, G_CC_MODULATEI, G_CC_MODULATEI);
 
@@ -756,51 +917,51 @@ static Gfx* BuildGraphicsTest(
 			} // End draw-group loop.
 		} // End material-batch loop.
 
-// Draw a 2x texture preview in the upper-left corner.
-	gDPPipeSync(p++);
+	if (!terrainView) {
+		// Preserve the texture overlay in model/contour previews.
+		gDPPipeSync(p++);
 
-	gDPSetCycleType(p++, G_CYC_1CYCLE);
-	gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
-	gDPSetAlphaCompare(p++, G_AC_NONE);
+		gDPSetCycleType(p++, G_CYC_1CYCLE);
+		gDPSetRenderMode(p++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+		gDPSetAlphaCompare(p++, G_AC_NONE);
 
-	gDPSetTexturePersp(p++, G_TP_NONE);
-	gDPSetTextureLOD(p++, G_TL_TILE);
-	gDPSetTextureDetail(p++, G_TD_CLAMP);
-	gDPSetTextureLUT(p++, G_TT_NONE);
-	gDPSetTextureFilter(p++, G_TF_POINT);
-	gDPSetTextureConvert(p++, G_TC_FILT);
+		gDPSetTexturePersp(p++, G_TP_NONE);
+		gDPSetTextureLOD(p++, G_TL_TILE);
+		gDPSetTextureDetail(p++, G_TD_CLAMP);
+		gDPSetTextureLUT(p++, G_TT_NONE);
+		gDPSetTextureFilter(p++, G_TF_POINT);
+		gDPSetTextureConvert(p++, G_TC_FILT);
 
-	gDPSetCombineMode(p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+		gDPSetCombineMode(
+		    p++, G_CC_DECALRGBA, G_CC_DECALRGBA);
 
-	gDPLoadTextureBlock(
-	    p++,
-	    texture.data(),
-	    G_IM_FMT_RGBA,
-	    G_IM_SIZ_16b,
-	    32,
-	    64,
-	    0,
-	    G_TX_CLAMP,
-	    G_TX_CLAMP,
-	    G_TX_NOMASK,
-	    G_TX_NOMASK,
-	    G_TX_NOLOD,
-	    G_TX_NOLOD);
+		gDPLoadTextureBlock(
+		    p++,
+		    texture.data(),
+		    G_IM_FMT_RGBA,
+		    G_IM_SIZ_16b,
+		    32,
+		    64,
+		    0,
+		    G_TX_CLAMP,
+		    G_TX_CLAMP,
+		    G_TX_NOMASK,
+		    G_TX_NOMASK,
+		    G_TX_NOLOD,
+		    G_TX_NOLOD);
 
-// Rectangle coordinates use two fractional bits.
-// Texture derivatives use ten fractional bits:
-// 512 means half a texel per screen pixel, giving 2x enlargement.
-	gSPTextureRectangle(
-	    p++,
-	    8 << 2,
-	    8 << 2,
-	    72 << 2,
-	    136 << 2,
-	    G_TX_RENDERTILE,
-	    0,
-	    0,
-	    512,
-	    512);
+		gSPTextureRectangle(
+		    p++,
+		    8 << 2,
+		    8 << 2,
+		    72 << 2,
+		    136 << 2,
+		    G_TX_RENDERTILE,
+		    0,
+		    0,
+		    512,
+		    512);
+		}
 
 	gDPPipeSync(p++);
 
@@ -819,9 +980,14 @@ int main(int argc, char* argv[]) {
 		    argc == 3 &&
 		    std::string_view(argv[1]) == "--contour";
 
-		const bool terrainPreview =
+		const bool terrainTextured =
 		    argc == 3 &&
-		    std::string_view(argv[1]) == "--terrain";
+		    std::string_view(argv[1]) == "--terrain-textured";
+
+		const bool terrainPreview =
+		    terrainTextured ||
+		    (argc == 3 &&
+		     std::string_view(argv[1]) == "--terrain");
 
 		if (argc != 1 && argc != 2 &&
 		        !contourPreview && !terrainPreview) {
@@ -829,7 +995,8 @@ int main(int argc, char* argv[]) {
 			std::cerr
 			        << "Usage: " << argv[0] << " [model-id]\n"
 			        << "       " << argv[0] << " --contour 3\n"
-			        << "       " << argv[0] << " --terrain 0\n";
+			        << "       " << argv[0] << " --terrain 0\n"
+			        << "       " << argv[0] << " --terrain-textured 0\n";
 			return 1;
 			}
 
@@ -865,10 +1032,13 @@ int main(int argc, char* argv[]) {
 
 		const RomPreviewModel loadedModel =
 		    terrainPreview
-		    ? LoadRomTerrainDiagnostic("baserom.us.z64", modelId)
+		    ? LoadRomTerrainDiagnostic(
+		        "baserom.us.z64", modelId, terrainTextured)
 		    : contourPreview
-		    ? LoadRomContourDiagnostic("baserom.us.z64", modelId)
-		    : LoadRomPreviewModel("baserom.us.z64", modelId);
+		    ? LoadRomContourDiagnostic(
+		        "baserom.us.z64", modelId)
+		    : LoadRomPreviewModel(
+		        "baserom.us.z64", modelId);
 
 		const std::vector<Mtx4F> partTransforms =
 		    BuildPreviewPartTransforms(loadedModel);
@@ -1167,7 +1337,8 @@ int main(int argc, char* argv[]) {
 			                        loadedTexture,
 			                        modelTextures,
 			                        drawGroups,
-			                        partTransforms);
+			                        partTransforms,
+			                        terrainPreview);
 
 			window->DrawAndRunGraphicsCommands(
 			    graphicsTest, {}, {});

@@ -11,10 +11,12 @@
 #include <string>
 #include <vector>
 #include <map>
+#include "rom_texture.h"
 
 inline RomPreviewModel LoadRomContourDiagnostic(
     const std::string& romPath,
-    std::size_t contourId) {
+    std::size_t contourId,
+    bool textured = false) {
 
 	if (contourId > 3) {
 		throw std::runtime_error(
@@ -202,10 +204,26 @@ inline RomPreviewModel LoadRomContourDiagnostic(
 		batch.partIndex = 0;
 		batch.firstTriangle = result.triangles.size();
 
-		// Diagnostic state only: no texturing, lighting, fog,
-		// translucency, or decal behavior.
+		const uint32_t sourceTextureId = sourceState & 0xFFFu;
+
+		const bool useTexture =
+		    textured &&
+		    IsTerrainBaseTextureSupported(sourceTextureId);
+
 		batch.state =
-		    (sourceState & retainedGeometryBits) | 0xFFFu;
+		    (sourceState & retainedGeometryBits) |
+		    (useTexture ? sourceTextureId : 0xFFFu);
+
+		if (retain &&
+		        textured &&
+		        sourceTextureId != 0xFFFu &&
+		        !useTexture) {
+
+			std::cout
+			        << "Terrain material fallback: texture "
+			        << sourceTextureId
+			        << " uses vertex colors only\n";
+			}
 
 		std::array<int, 32> slots;
 		slots.fill(-1);
@@ -342,7 +360,9 @@ inline RomPreviewModel LoadRomContourDiagnostic(
 	result.matrices.push_back(identity);
 
 	std::cout
-	        << "Contour diagnostic: vertex colors only\n"
+	        << (textured
+	            ? "Contour diagnostic: supported base-level textures\n"
+	            : "Contour diagnostic: vertex colors only\n")
 	        << "Source vertices: " << vertexCount << '\n'
 	        << "Source batches: " << sourceBatchCount << '\n'
 	        << "Source triangles: " << sourceTriangles << '\n'
@@ -359,7 +379,8 @@ inline RomPreviewModel LoadRomContourDiagnostic(
 
 inline RomPreviewModel LoadRomTerrainDiagnostic(
     const std::string& romPath,
-    std::size_t terrainId) {
+    std::size_t terrainId,
+    bool textured = false) {
 
 	if (terrainId != 0) {
 		throw std::runtime_error(
@@ -547,7 +568,8 @@ inline RomPreviewModel LoadRomTerrainDiagnostic(
 		        << ", contour " << contourIds[cell] << '\n';
 
 		const RomPreviewModel source =
-		    LoadRomContourDiagnostic(romPath, contourIds[cell]);
+		    LoadRomContourDiagnostic(
+		        romPath, contourIds[cell], textured);
 
 		const std::size_t vertexBase = result.vertices.size();
 
@@ -600,7 +622,8 @@ inline RomPreviewModel LoadRomTerrainDiagnostic(
 				continue;
 				}
 
-			if (result.batches.size() >= kPreviewMaxBatches) {
+			if (result.batches.size() >=
+			        (textured ? std::size_t{128} : kPreviewMaxBatches)) {
 				throw std::runtime_error(
 				    "Assembled terrain batch capacity exceeded.");
 				}
@@ -647,7 +670,9 @@ inline RomPreviewModel LoadRomTerrainDiagnostic(
 		}
 
 	std::cout
-	        << "\nTerrain diagnostic: four cells, vertex colors only\n"
+	        << (textured
+	            ? "\nTerrain diagnostic: four cells, base-level textures\n"
+	            : "\nTerrain diagnostic: four cells, vertex colors only\n")
 	        << "Terrain cells: 4\n"
 	        << "Source vertices: " << result.vertices.size() << '\n'
 	        << "Retained source batches: "

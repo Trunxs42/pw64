@@ -22,16 +22,157 @@ struct RomPreviewTextureSpec {
 	bool normalizeOddRows;
 	};
 
+inline bool IsTerrainBaseTextureSupported(uint32_t textureId) {
+	switch (textureId) {
+		case 0:
+		case 1:
+		case 2:
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 18:
+		case 19:
+		case 20:
+		case 21:
+		case 23:
+		case 28:
+		case 29:
+		case 32:
+		case 36:
+		case 51:
+		case 52:
+		case 53:
+		case 54:
+			return true;
+
+		default:
+			return false;
+		}
+	}
+
 inline RomPreviewTextureSpec GetRomPreviewTextureSpec(
     std::size_t textureId) {
 
 	switch (textureId) {
+		case 0:
+			return {
+				64, 16, 2736, 25, 12,
+				0xF5102000u, 0x01010200u, 128, true
+				};
+
+		case 1:
+			return {
+				32, 16, 704, 25, 12,
+				0xF5880800u, 0x01010050u, 32, true
+				};
+
 		case 2:
 			return {
 				32, 64, 4096, 13, 10,
 				0xF5101000u, 0x01018250u, 64, false
 				};
+		case 3:
+			return {
+				64, 64, 2800, 25, 12,
+				0xF5800800u, 0x01018060u, 32, true
+				};
 
+		case 4:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
+		case 5:
+			return {
+				64, 32, 1400, 25, 12,
+				0xF5800800u, 0x01014060u, 32, true
+				};
+
+		case 6:
+			return {
+				64, 16, 2736, 25, 12,
+				0xF5102000u, 0x01080200u, 128, true
+				};
+
+		case 18:
+			return {
+				32, 128, 3040, 25, 12,
+				0xF5800400u, 0x0105C150u, 16, true
+				};
+
+		case 19:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014150u, 64, true
+				};
+
+		case 20:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
+		case 21:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
+		case 23:
+			return {
+				64, 32, 4096, 13, 10,
+				0xF5102000u, 0x01014060u, 128, false
+				};
+
+		case 28:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
+		case 29:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01080050u, 64, true
+				};
+
+		case 32:
+			return {
+				16, 16, 248, 23, 12,
+				0xF5800200u, 0x01050140u, 8, true
+				};
+
+		case 36:
+			return {
+				32, 32, 2744, 25, 12,
+				0xF5101000u, 0x01014050u, 64, true
+				};
+
+		case 51:
+			return {
+				32, 64, 4096, 13, 10,
+				0xF5101000u, 0x01098250u, 64, false
+				};
+
+		case 52:
+			return {
+				32, 64, 4096, 13, 10,
+				0xF5101000u, 0x01098250u, 64, false
+				};
+
+		case 53:
+			return {
+				32, 47, 4056, 25, 12,
+				0xF5101000u, 0x01080200u, 64, true
+				};
+
+		case 54:
+			return {
+				64, 23, 3976, 25, 12,
+				0xF5102000u, 0x01080200u, 128, true
+				};
 		case 86:
 			return {
 				32, 32, 512, 13, 10,
