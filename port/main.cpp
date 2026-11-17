@@ -1409,17 +1409,17 @@ int main(int argc, char* argv[]) {
 			uvVec3Copy(&rectanglePosition, &nextPosition);
 
 			Gfx* graphicsTest = BuildGraphicsTest(
-			                        static_cast<int>(rectanglePosition.x),
-			                        static_cast<int>(rectanglePosition.y),
-			                        triangleAngle,
-			                        loadedModel,
-			                        framing,
-			                        loadedTexture,
-			                        modelTextures,
-			                        drawGroups,
-			                        partTransforms,
-			                        terrainPreview,
-			                        terrainCamera);
+				static_cast<int>(rectanglePosition.x),
+				static_cast<int>(rectanglePosition.y),
+				triangleAngle,
+				loadedModel,
+				framing,
+				loadedTexture,
+				modelTextures,
+				drawGroups,
+				partTransforms,
+				terrainPreview,
+				terrainCamera);
 
 			window->DrawAndRunGraphicsCommands(
 			    graphicsTest, {}, {});
